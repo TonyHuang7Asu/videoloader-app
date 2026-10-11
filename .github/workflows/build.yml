@@ -1,0 +1,28 @@
+name: Build iOS App
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build (unsigned ipa)
+        run: |
+          xcodebuild -project VideoLoader.xcodeproj -scheme VideoLoader \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app")
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry VideoLoader.ipa Payload
+      - name: Upload ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoLoader-ipa
+          path: VideoLoader.ipa

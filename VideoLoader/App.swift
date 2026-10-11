@@ -22,7 +22,6 @@ struct ContentView: UIViewRepresentable {
             let cfg = WKWebViewConfiguration()
             cfg.userContentController.add(self, name: "saveVideo")
             cfg.allowsInlineMediaPlayback = true
-            cfg.mediaTypesRequiringUserActionForAutoplay = []
             let wv = WKWebView(frame: .zero, configuration: cfg)
             wv.navigationDelegate = self
             wv.allowsBackForwardNavigationGestures = true
@@ -58,7 +57,7 @@ struct ContentView: UIViewRepresentable {
                         self?.notify(ok: false, msg: "没有相册写入权限"); return
                     }
                     PHPhotoLibrary.shared().performChanges({
-                        PHAssetChangeRequest.creationRequestForAssetFromVideo(at: dest)
+                        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: dest)
                     }) { [weak self] ok, _ in
                         self?.notify(ok: ok, msg: ok ? "已存入相册" : "保存失败")
                     }
@@ -70,12 +69,19 @@ struct ContentView: UIViewRepresentable {
         // 原生 → 网页：window.nativeSaveDone(ok, msg)，并弹系统提示
         private func notify(ok: Bool?, msg: String) {
             DispatchQueue.main.async { [weak self] in
-                guard let self, let wv = self.webView.window?.topMostViewController() ?? self.webView.topMostViewController() else { return }
-                let alert = UIAlertController(title: ok == true ? "已存入相册" : (ok == nil ? "下载中" : "出错了"),
-                                              message: msg, preferredStyle: .alert)
-                alert.addAction(UIAlertAction(title: "好", style: .default))
-                wv.present(alert, animated: ok != nil)
-                wv.evaluateJavaScript("window.nativeSaveDone && window.nativeSaveDone(\(ok.map(String.init) ?? "null"), \(msg.debugDescription))")
+                guard let self else { return }
+                let okJs = ok.map(String.init) ?? "null"
+                self.webView.evaluateJavaScript(
+                    "window.nativeSaveDone && window.nativeSaveDone(\(okJs), \(msg.debugDescription))"
+                )
+                if ok != nil {
+                    if let top = self.webView.topMostViewController() {
+                        let alert = UIAlertController(title: ok == true ? "已存入相册" : "出错了",
+                                                      message: msg, preferredStyle: .alert)
+                        alert.addAction(UIAlertAction(title: "好", style: .default))
+                        top.present(alert, animated: true)
+                    }
+                }
             }
         }
     }

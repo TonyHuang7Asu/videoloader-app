@@ -1,0 +1,27 @@
+name: VideoLoader
+options:
+  bundleIdPrefix: com.vlapp
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+targets:
+  VideoLoader:
+    type: application
+    platform: iOS
+    sources:
+      - VideoLoader
+    info:
+      path: VideoLoader/Info.plist
+      properties:
+        CFBundleDisplayName: VideoLoader
+        UILaunchScreen: {}
+        NSPhotoLibraryAddUsageDescription: 用于把下载的视频保存到你的相册
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic

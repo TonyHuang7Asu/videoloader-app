@@ -29,6 +29,24 @@ struct ContentView: UIViewRepresentable {
             return wv
         }()
 
+        // 白屏诊断：加载失败时显示错误页（含排查提示）
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            showLoadError(error)
+        }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            showLoadError(error)
+        }
+        private func showLoadError(_ error: Error) {
+            let msg = (error as NSError).localizedDescription
+            var html = "<html><body style='background:#0b1020;color:#eef1ff;padding:28px;font-family:-apple-system;line-height:1.7'>"
+            html += "<h2 style='color:#ff8a8a'>加载失败</h2><p>" + msg + "</p>"
+            html += "<p>1. 开启手机上的代理/加速器（workers.dev 被墙）</p>"
+            html += "<p>2. 设置 → App → VideoLoader → 无线数据 → 选「WLAN与蜂窝网络」</p>"
+            html += "<button onclick='location.reload()' style='background:#4f7cff;color:#fff;border:0;border-radius:10px;padding:12px 24px;font-size:15px'>重试</button>"
+            html += "</body></html>"
+            webView.loadHTMLString(html, baseURL: nil)
+        }
+
         // 网页 → 原生：window.webkit.messageHandlers.saveVideo.postMessage({url, name})
         func userContentController(_ userContentController: WKUserContentController,
                                    didReceive message: WKScriptMessage) {

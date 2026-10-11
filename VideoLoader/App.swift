@@ -25,7 +25,7 @@ struct ContentView: UIViewRepresentable {
             let wv = WKWebView(frame: .zero, configuration: cfg)
             wv.navigationDelegate = self
             wv.allowsBackForwardNavigationGestures = true
-            wv.load(URLRequest(url: Self.startURL))
+            wv.load(URLRequest(url: ContentView.startURL))
             return wv
         }()
 

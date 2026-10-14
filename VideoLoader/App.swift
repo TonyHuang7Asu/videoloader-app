@@ -25,6 +25,16 @@ struct ContentView: View {
 
     static let startURL = URL(string: "https://videoloader.7hvn4hvz8h.workers.dev")!
 
+    private var activeCount: Int {
+        dm.items.filter { ["等待", "下载中", "保存中"].contains($0.state) }.count
+    }
+    private var failedCount: Int { dm.items.filter { $0.state == "失败" }.count }
+    /// 有失败就先报失败，否则报进行中——不用展开队列也能看出「有东西没下成」
+    private var badge: String {
+        if failedCount > 0 { return "队列 \(activeCount) · \(failedCount) 失败" }
+        return activeCount > 0 ? "队列 \(activeCount)" : "下载队列"
+    }
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             AppWebView()
@@ -34,12 +44,13 @@ struct ContentView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "tray.and.arrow.down")
-                    let active = dm.items.filter { ["等待","下载中","保存中"].contains($0.state) }.count
-                    Text(active > 0 ? "队列 \(active)" : "下载队列")
+                    Text(badge)
                 }
                 .font(.footnote.weight(.bold))
                 .padding(.horizontal, 14).padding(.vertical, 9)
                 .background(Capsule().fill(.ultraThinMaterial))
+                .overlay(Capsule().stroke(failedCount > 0 ? Color.red.opacity(0.7) : Color.clear, lineWidth: 1.5))
+                .foregroundColor(failedCount > 0 ? .red : .primary)
             }
             .padding(.trailing, 14)
             .padding(.bottom, 90)

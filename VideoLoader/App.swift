@@ -58,7 +58,10 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showQueue) { QueueView() }
         .onChange(of: scenePhase) { phase in
-            if phase == .active { dm.reviveStalled() }
+            if phase == .active {
+                dm.reviveStalled()
+                AppWebView.Coordinator.current?.reloadIfFailed()
+            }
         }
     }
 }
@@ -89,7 +92,9 @@ struct AppWebView: UIViewRepresentable {
             switch message.name {
             case "saveVideo":
                 if let b = message.body as? [String: Any], let u = b["url"] as? String {
-                    DownloadManager.shared.add(url: u, name: (b["name"] as? String) ?? "video.mp4")
+                    DownloadManager.shared.add(url: u,
+                                               name: (b["name"] as? String) ?? "video.mp4",
+                                               size: (b["size"] as? NSNumber)?.int64Value ?? 0)
                     notify("已加入下载队列（\(DownloadManager.shared.items.count) 个）")
                 }
             case "saveVideoBatch":
@@ -112,9 +117,23 @@ struct AppWebView: UIViewRepresentable {
         }
 
         // 白屏诊断：加载失败时显示错误页（只显示一次，避免重定向循环）
-        private var showedError = false
+        static weak var current: Coordinator?
+        private var failed = false
+
+        override init() {
+            super.init()
+            Coordinator.current = self
+        }
+
+        /// 回到前台时如果停在错误页，自动重新加载一次
+        func reloadIfFailed() {
+            guard failed else { return }
+            failed = false
+            webView.load(URLRequest(url: ContentView.startURL))
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            showedError = false
+            failed = false
         }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             showError(error)
@@ -123,8 +142,8 @@ struct AppWebView: UIViewRepresentable {
             showError(error)
         }
         private func showError(_ error: Error) {
-            guard !showedError else { return }
-            showedError = true
+            guard !failed else { return }
+            failed = true
             let msg = (error as NSError).localizedDescription
             var html = "<html><body style='background:#0b1020;color:#eef1ff;padding:28px;font-family:-apple-system;line-height:1.7'>"
             html += "<h2 style='color:#ff8a8a'>加载失败</h2><p>" + msg + "</p>"

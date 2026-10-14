@@ -11,6 +11,16 @@ struct VideoLoaderApp: App {
 
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // 冷启动回收旧版本留下的僵尸临时文件（第一版/v6.0 每下一个视频就在 tmp 留一份完整拷贝）
+        // 后台被系统唤醒时不做，省得白跑一次 WebKit 清缓存的活
+        if application.applicationState != .background {
+            StorageJanitor.shared.run(.startup)
+        }
+        return true
+    }
+
+    func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
         DownloadManager.shared.backgroundCompletionHandler = completionHandler
@@ -61,6 +71,7 @@ struct ContentView: View {
             if phase == .active {
                 dm.reviveStalled()
                 AppWebView.Coordinator.current?.reloadIfFailed()
+                StorageJanitor.shared.run(.foreground)   // 轻扫：只清 1 小时以上的残留
             }
         }
     }

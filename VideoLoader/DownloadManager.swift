@@ -52,6 +52,7 @@ final class DownloadManager: NSObject, ObservableObject {
     static let maxConcurrent = 2          // 只统计「下载中」，写相册不占带宽也不占名额
     static let maxAutoRetry = 2           // 回来前台/网络抖动导致的失败先自己重试
     static let stallSeconds: TimeInterval = 60
+    static let maxFinishedKeep = 500      // downloads.json 里最多留这么多条已完成记录
 
     @Published var items: [DownloadItem] = []
     var backgroundCompletionHandler: (() -> Void)?
@@ -230,6 +231,22 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
+    /// 已完成的记录只留最近 maxFinishedKeep 条，免得 downloads.json 无限长大
+    private func pruneFinished() {
+        let finished = items.filter { $0.state == "完成" }
+        guard finished.count > Self.maxFinishedKeep else { return }
+        let keep = Set(finished.suffix(Self.maxFinishedKeep).map { $0.id })
+        let drop = Set(finished.map { $0.id }).subtracting(keep)
+        guard !drop.isEmpty else { return }
+        for id in drop {
+            tasks[id] = nil
+            speedMarks[id] = nil
+            lastTick[id] = nil
+            resumeData[id] = nil
+        }
+        items.removeAll { drop.contains($0.id) }
+    }
+
     // ---------- 持久化 ----------
     // 进度回调非常密集，落盘按 0.5s 节流；force=true 用于状态切换等关键节点
     private func persist(force: Bool = false) {
@@ -340,9 +357,12 @@ extension DownloadManager: URLSessionDownloadDelegate {
         // 系统只保证在这个回调返回前文件还在，所以「搬走」必须同步做完
         let staged = FileManager.default.temporaryDirectory
             .appendingPathComponent("vl-" + UUID().uuidString + ".mp4")
+        // 先登记再创建，清扫器就不会把这个文件当残留删掉
+        StorageJanitor.shared.registerActive(staged.path)
         do {
             try FileManager.default.moveItem(at: location, to: staged)
         } catch {
+            StorageJanitor.shared.unregisterActive(staged.path)
             finish(id: id, ok: false, err: "文件处理失败：\(error.localizedDescription)")
             return
         }
@@ -354,6 +374,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                let e = o["error"] as? String { msg = e }
             try? FileManager.default.removeItem(at: staged)
+            StorageJanitor.shared.unregisterActive(staged.path)
             finish(id: id, ok: false, err: msg)
             return
         }
@@ -361,26 +382,35 @@ extension DownloadManager: URLSessionDownloadDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else {
                 try? FileManager.default.removeItem(at: staged)
+                StorageJanitor.shared.unregisterActive(staged.path)
                 return
             }
             guard self.items.contains(where: { $0.id == id }) else {
                 try? FileManager.default.removeItem(at: staged)   // 条目已被删除
+                StorageJanitor.shared.unregisterActive(staged.path)
                 self.kick()
                 return
             }
             let name = self.items.first(where: { $0.id == id })?.name ?? "video.mp4"
             let dest = FileManager.default.temporaryDirectory
                 .appendingPathComponent(UUID().uuidString + "_" + name)
+            StorageJanitor.shared.registerActive(dest.path)
             if (try? FileManager.default.moveItem(at: staged, to: dest)) == nil {
                 try? FileManager.default.removeItem(at: staged)
+                StorageJanitor.shared.unregisterActive(staged.path)
+                StorageJanitor.shared.unregisterActive(dest.path)
                 self.finish(id: id, ok: false, err: "文件处理失败")
                 return
             }
+            StorageJanitor.shared.unregisterActive(staged.path)
 
             self.update(id) { $0.state = "保存中"; $0.progress = 1; $0.speed = 0 }
             self.savingIDs.insert(id)
             // 成败都要删临时文件，否则下 30 个视频会在 tmp 里留几十份拷贝
-            let cleanup = { try? FileManager.default.removeItem(at: dest) }
+            let cleanup = {
+                try? FileManager.default.removeItem(at: dest)
+                StorageJanitor.shared.unregisterActive(dest.path)
+            }
             PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] st in
                 guard st == .authorized || st == .limited else {
                     cleanup()
@@ -441,6 +471,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                     $0.doneAt = Date()
                 }
                 self.resumeData[id] = nil
+                self.pruneFinished()
                 self.persist(force: true)
                 self.notifyWeb(ok: true, msg: "已存入相册：" + nm)
             } else if self.items[idx].retries < Self.maxAutoRetry {
@@ -451,6 +482,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.persist(force: true)
                 self.notifyWeb(ok: true, msg: "自动重试 \(self.items[idx].retries)/\(Self.maxAutoRetry)：" + nm)
             } else {
+                // 彻底放弃：续传数据也一起丢掉，别继续占着内存
+                self.resumeData[id] = nil
                 self.update(id) { $0.state = "失败"; $0.error = err; $0.speed = 0 }
                 self.persist(force: true)
                 self.notifyWeb(ok: false, msg: nm + "：" + (err ?? "未知错误"))

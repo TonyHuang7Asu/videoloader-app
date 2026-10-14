@@ -14,6 +14,8 @@ targets:
       path: VideoLoader/Info.plist
       properties:
         CFBundleDisplayName: VideoLoader
+        CFBundleShortVersionString: "6.0"
+        CFBundleVersion: "6"
         UILaunchScreen: {}
         NSPhotoLibraryAddUsageDescription: 用于把下载的视频保存到你的相册
         UISupportedInterfaceOrientations:

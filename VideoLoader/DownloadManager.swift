@@ -1,12 +1,13 @@
+import Combine
 import Foundation
 import Photos
 import WebKit
 
 // 单条下载记录（持久化，跨启动保留）
 struct DownloadItem: Codable, Identifiable {
-    var id = UUID().uuidString
-    var url: String
-    var name: String
+    var id: String = UUID().uuidString
+    var url: String = ""
+    var name: String = "video.mp4"
     var state: String = "等待"          // 等待 / 下载中 / 保存中 / 完成 / 失败
     var progress: Double = 0            // 0-1
     var downloaded: Int64 = 0

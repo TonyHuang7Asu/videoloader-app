@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 // 原生下载队列界面：进度条 + 实时速度 + 失败重试

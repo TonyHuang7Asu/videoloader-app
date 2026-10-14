@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 @main
@@ -36,7 +37,7 @@ struct ContentView: View {
                     let active = dm.items.filter { ["等待","下载中","保存中"].contains($0.state) }.count
                     Text(active > 0 ? "队列 \(active)" : "下载队列")
                 }
-                .font(.footnote).bold()
+                .font(.footnote.weight(.bold))
                 .padding(.horizontal, 14).padding(.vertical, 9)
                 .background(Capsule().fill(.ultraThinMaterial))
             }
@@ -54,6 +55,9 @@ struct ContentView: View {
 struct AppWebView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    func makeUIView(context: Context) -> WKWebView { context.coordinator.webView }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         lazy var webView: WKWebView = {
             let cfg = WKWebViewConfiguration()
@@ -67,9 +71,6 @@ struct AppWebView: UIViewRepresentable {
             wv.load(URLRequest(url: ContentView.startURL))
             return wv
         }()
-
-        func makeUIView(context: Context) -> WKWebView { context.coordinator.webView }
-        func updateUIView(_ uiView: WKWebView, context: Context) {}
 
         // 网页 → 原生
         func userContentController(_ userContentController: WKUserContentController,

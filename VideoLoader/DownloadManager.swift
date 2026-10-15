@@ -43,7 +43,8 @@ struct DownloadItem: Codable, Identifiable {
 
 /// 下载队列。
 ///
-/// 线程约定：`items` / `resumeData` / `speedMarks` / `savingIDs` / `tasks` / `lastTick` / `stallIDs`
+/// 线程约定：`items` / `resumeData` / `speedMarks` / `savingIDs` / `tasks` / `lastBytes` /
+/// `lastTickBytes` / `stallTicks` / `stallIDs`
 /// 全部**只在主线程读写**。URLSession 回调跑在 delegate 队列上，一律先 `DispatchQueue.main.async`
 /// 再碰这些状态，因此不需要任何锁。
 final class DownloadManager: NSObject, ObservableObject {
@@ -51,7 +52,7 @@ final class DownloadManager: NSObject, ObservableObject {
     static let sessionIdentifier = "com.vlapp.downloads"
     static let maxConcurrent = 2          // 只统计「下载中」，写相册不占带宽也不占名额
     static let maxAutoRetry = 2           // 回来前台/网络抖动导致的失败先自己重试
-    static let stallSeconds: TimeInterval = 60
+    static let stallTicks = 24            // 连续 24 次心跳（5 秒一次 ≈ 2 分钟）没有字节推进才算停滞
     static let maxFinishedKeep = 500      // downloads.json 里最多留这么多条已完成记录
 
     @Published var items: [DownloadItem] = []
@@ -63,7 +64,11 @@ final class DownloadManager: NSObject, ObservableObject {
     private var speedMarks: [String: (bytes: Int64, time: Date)] = [:]
     private var savingIDs = Set<String>()
     private var tasks: [String: URLSessionDownloadTask] = [:]
-    private var lastTick: [String: Date] = [:]
+    // 停滞判定必须看「字节数有没有涨」，不能看墙上时钟：
+    // App 被挂起时定时器不跑，回来后 lastTick 早就过期，会把正在下的任务全部误杀。
+    private var lastBytes: [String: Int64] = [:]
+    private var lastTickBytes: [String: Int64] = [:]
+    private var stallTicks: [String: Int] = [:]
     private var stallIDs = Set<String>()
     private var lastWrite = Date.distantPast
     private var lastPush = Date.distantPast
@@ -139,7 +144,7 @@ final class DownloadManager: NSObject, ObservableObject {
         resumeData[id] = nil
         savingIDs.remove(id)
         speedMarks[id] = nil
-        lastTick[id] = nil
+        clearStall(id)
         stallIDs.remove(id)
         items.removeAll { $0.id == id }
         persist(force: true)
@@ -151,7 +156,7 @@ final class DownloadManager: NSObject, ObservableObject {
         for i in items.filter({ $0.state == "完成" }).map({ $0.id }) {
             tasks[i] = nil
             speedMarks[i] = nil
-            lastTick[i] = nil
+            clearStall(i)
         }
         items.removeAll { $0.state == "完成" }
         persist(force: true)
@@ -164,6 +169,7 @@ final class DownloadManager: NSObject, ObservableObject {
             let live = Set(tasks.compactMap { $0.taskDescription })
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                self.resetStallWatch()
                 var changed = false
                 for i in self.items.indices {
                     let st = self.items[i].state
@@ -200,7 +206,7 @@ final class DownloadManager: NSObject, ObservableObject {
         items[idx].state = "下载中"
         let id = items[idx].id
         let urlStr = items[idx].url
-        lastTick[id] = Date()
+        lastBytes[id] = -1; lastTickBytes[id] = -2; stallTicks[id] = 0
         persist(force: true)
         guard let url = URL(string: urlStr) else {
             update(id) { $0.state = "失败"; $0.error = "地址无效" }
@@ -218,13 +224,33 @@ final class DownloadManager: NSObject, ObservableObject {
         task.resume()
     }
 
-    /// 超过 stallSeconds 没有字节推进的任务：取消（顺带取回续传数据）后交给自动重试
-    private func checkStalls() {
-        let now = Date()
+    private func clearStall(_ id: String) {
+        lastBytes[id] = nil
+        lastTickBytes[id] = nil
+        stallTicks[id] = nil
+    }
+
+    /// 回到前台时把停滞计数清零：挂起期间定时器不跑，不清零会把活着的任务当成停滞误杀
+    private func resetStallWatch() {
         for i in items.indices where items[i].state == "下载中" {
             let id = items[i].id
-            guard let last = lastTick[id] else { lastTick[id] = now; continue }
-            if now.timeIntervalSince(last) > Self.stallSeconds {
+            lastTickBytes[id] = nil
+            stallTicks[id] = 0
+        }
+    }
+
+    /// 连续 stallTicks 次心跳都没有字节推进才判定停滞（顺带取回续传数据）后交给自动重试
+    private func checkStalls() {
+        for i in items.indices where items[i].state == "下载中" {
+            let id = items[i].id
+            let bytes = lastBytes[id] ?? -1
+            if let prev = lastTickBytes[id], prev == bytes {
+                stallTicks[id, default: 0] += 1
+            } else {
+                stallTicks[id] = 0
+                lastTickBytes[id] = bytes
+            }
+            if (stallTicks[id] ?? 0) >= Self.stallTicks {
                 stallIDs.insert(id)
                 tasks[id]?.cancel()
             }
@@ -241,7 +267,7 @@ final class DownloadManager: NSObject, ObservableObject {
         for id in drop {
             tasks[id] = nil
             speedMarks[id] = nil
-            lastTick[id] = nil
+            clearStall(id)
             resumeData[id] = nil
         }
         items.removeAll { drop.contains($0.id) }
@@ -330,7 +356,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             let now = Date()
-            self.lastTick[id] = now
+            self.lastBytes[id] = totalBytesWritten
             var speed: Double = 0
             if let mark = self.speedMarks[id] {
                 let dt = now.timeIntervalSince(mark.time)
@@ -437,7 +463,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             guard let self = self else { return }
             self.tasks[id] = nil
             self.speedMarks[id] = nil
-            self.lastTick[id] = nil
+            self.clearStall(id)
             // 条目已被用户删除（主动取消）：什么都不做
             guard self.items.contains(where: { $0.id == id }) else {
                 self.stallIDs.remove(id)
@@ -446,9 +472,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             if let rd = rd { self.resumeData[id] = rd }
             self.savingIDs.remove(id)
             let stalled = self.stallIDs.remove(id) != nil
-            let msg = stalled
-                ? "下载停滞（\(Int(Self.stallSeconds)) 秒无进度）"
-                : ns.localizedDescription
+            let msg = stalled ? "下载停滞（约 2 分钟没有数据）" : ns.localizedDescription
             self.finish(id: id, ok: false, err: msg)
         }
     }
@@ -458,7 +482,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             guard let self = self else { return }
             self.tasks[id] = nil
             self.speedMarks[id] = nil
-            self.lastTick[id] = nil
+            self.clearStall(id)
             guard let idx = self.items.firstIndex(where: { $0.id == id }) else { return }
             let nm = self.items[idx].name
 

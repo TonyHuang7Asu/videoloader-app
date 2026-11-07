@@ -28,7 +28,7 @@ public class DownloadEngine {
     public static void detach() { main = null; }
 
     static class Job {
-        String id, url, name;
+        String id, url, name, state = "pending", err = "";
         long bytes, total;
         long lastMark; long lastBytes;
         double speed;
@@ -122,7 +122,7 @@ public class DownloadEngine {
         if (main == null) return;
         final WebView wv = main.webViewRef;
         if (wv == null) return;
-        main.runOnUiThread(() -> wv.evaluateJavascript(js, null));
+        main.runOnUi(() -> wv.evaluateJavascript(js, null));
     }
 
     private static void ensureService() { if (main != null) main.startDlService(); }

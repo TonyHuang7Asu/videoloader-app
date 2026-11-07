@@ -46,7 +46,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
     }
     void stopDlService() { stopService(new Intent(this, DlService.class)); }
-    void runOnUiThread(Runnable r) { super.runOnUiThread(r); }
+    void runOnUi(Runnable r) { super.runOnUiThread(r); }
 
     public class Bridge {
         @android.webkit.JavascriptInterface

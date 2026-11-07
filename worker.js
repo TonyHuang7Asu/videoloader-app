@@ -107,31 +107,19 @@ export default {
 
 // ---------------- YouTube（Mac yt-dlp 引擎） ----------------
 async function apiResolveYouTube(url, env, secret) {
-  const target = url.searchParams.get('url') || '';
-  if (!/youtube\.com|youtu\.be/i.test(target)) return jres({ ok: false, error: '不是 YouTube 链接' }, 400);
-  if (!env || !env.VL_KV) return jres({ ok: false, error: 'KV 未绑定' }, 501);
-  const macBase = (await env.VL_KV.get('ytmac') || '').trim();
-  if (!macBase) return jres({ ok: false, error: 'YouTube 下载机未配置：先在 Mac 上完成 Tailscale 设置，把 https://xxx.ts.net 发给作者写入' }, 503);
-  let resp, data;
-  try {
-    resp = await fetch(macBase + '/yt/start', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url: target }),
-      signal: AbortSignal.timeout(280000),
-    });
-    data = await resp.json();
-  } catch (e) {
-    return jres({ ok: false, error: 'Mac 下载机不可达：' + (e.message || '超时') + '（Mac 需开机且 Tailscale Funnel 开启）' }, 502);
+  const target = url.searchParams.get("url") || "";
+  if (!/youtube\.com|youtu\.be/i.test(target)) return jres({ ok: false, error: "不是 YouTube 链接" }, 400);
+  if (!env || !env.VL_KV) return jres({ ok: false, error: "KV 未绑定" }, 501);
+  const slot = await pcSlotOf(env, secret);
+  const jobs = await pcRead(env, slot);
+  const vid = (target.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{6,})/) || [])[1] || String(Date.now() % 100000);
+  for (const j of jobs) if (j.u === target && (j.state === "pending" || j.state === "downloading")) {
+    return jres({ ok: true, pcQueued: true, platform: "YouTube", title: "YouTube_" + vid, dupe: true });
   }
-  if (!data.ok) return jres({ ok: false, error: data.error || 'Mac 端下载失败' }, 502);
-  const fileUrl = macBase + '/yt/file/' + data.id;
-  const name = (data.title || 'youtube').replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 80) + '.mp4';
-  const sig = (await hmacHex(fileUrl, secret)).slice(0, 32);
-  return jres({
-    ok: true, platform: 'YouTube', author: '', title: data.title || name,
-    thumb: '', published: null,
-    items: [{ url: fileUrl, sig, name, ext: 'mp4', res: 1080, bytes: data.size || 0 }],
-  });
+  const job = { id: "yt" + Date.now().toString(36), u: target, name: "YouTube_" + vid + ".mp4", dl: target, type: "yt", state: "pending", size: 0, error: "", at: Date.now() };
+  jobs.push(job);
+  await pcWrite(env, slot, jobs);
+  return jres({ ok: true, pcQueued: true, platform: "YouTube", title: job.name });
 }
 
 // ---------------- 云端备份（单部署单槽位） ----------------
@@ -1027,7 +1015,7 @@ function page() {
 "  if (!lines.length) return;",
 "  if (mode === 'single') lines = lines.slice(0, 1);",
 "  document.getElementById('url').value = '';",
-"  var okCount = 0, dupCount = 0, oldCount = 0, failCount = 0, done = 0;",
+"  var okCount = 0, dupCount = 0, oldCount = 0, failCount = 0, done = 0, pcN = 0;",
 "  status('解析中… 0/' + lines.length);",
 "  for (var i = 0; i < lines.length; i += 3) {",
 "    var batch = lines.slice(i, i + 3);",
@@ -1037,6 +1025,7 @@ function page() {
 "    }));",
 "    for (var b = 0; b < out.length; b++) {",
 "      done++;",
+"      if (out[b].ok && out[b].j.pcQueued) { pcN++; continue; }",
 "      if (out[b].ok) {",
 "        var added = addPending(out[b].j, out[b].j.sourceUrl);",
 "        if (added === 'skipped') dupCount++;",
@@ -1052,6 +1041,7 @@ function page() {
 "  if (oldCount) msg += '，其中 ' + oldCount + ' 个与下载历史重复（已标 ⚠️）';",
 "  if (dupCount) msg += '，跳过重复 ' + dupCount + ' 个';",
 "  if (failCount) msg += '，失败 ' + failCount + ' 个';",
+"  if (pcN) msg += '，YouTube ' + pcN + ' 个已发到电脑';",
 "  status(msg + (mode === 'batch' && okCount ? ' —— 继续粘贴，最后点底部「打包存相册」' : ''));",
 "}",
 "function readPending() { try { return JSON.parse(localStorage.getItem(PKEY) || '[]'); } catch (e) { return []; } }",
@@ -1138,16 +1128,10 @@ function page() {
 "    if (e.st === 'sent') st = '<div class=\"pstate sent\">⏳ 已交给 App 下载中，完成后会自动从这里消失</div>';",
 "    else if (e.st === 'retry') st = '<div class=\"pstate retry\">↺ 上次没成功：' + esc(e.err || '未知原因') + '<br>再点一次「打包存相册」就只重试这些</div>';",
 "    else if (e.st === 'unknown') st = '<div class=\"pstate unknown\">⚠️ 状态未确认：' + esc(e.err || 'App 没回报结果') + '<br>很可能已经下好了 —— 建议先看相册，确认没有再用「存到相册」补</div>';",
-"    var acts = e.st === 'sent'",
-"      ? '<button class=\"cpb\" onclick=\"copyLink(' + i + ')\">复制直链</button>' +",
-"        '<button class=\"rm\" onclick=\"removePending(' + i + ')\">移除</button>'",
-"      : (e.st === 'pc'",
-"      ? '<button class=\"cpb\" onclick=\"copyLink(' + i + ')\">复制直链</button>' +",
-"        '<button class=\"rm\" onclick=\"removePending(' + i + ')\">移除</button>'",
-"      : '<button class=\"save\" onclick=\"saveOne(' + i + ')\">存到相册</button>' +",
+"    var acts = '<button class=\"save\" onclick=\"saveOne(' + i + ')\">存到相册</button>' +",
 "        '<button class=\"topc\" onclick=\"toPC(' + i + ')\">💻 到电脑</button>' +",
 "        '<button class=\"cpb\" onclick=\"copyLink(' + i + ')\">复制直链</button>' +",
-"        '<button class=\"rm\" onclick=\"removePending(' + i + ')\">移除</button>');",
+"        '<button class=\"rm\" onclick=\"removePending(' + i + ')\">移除</button>';",
 "    if (e.st === 'pc') st = '<div class=\"pstate pcst\">💻 已发到电脑，Windows 代理会自动下载到固定文件夹</div>';",
 "    return '<div class=\"pitem' + (e.dup ? ' isdup' : '') + (e.st === 'retry' ? ' isfail' : '') + (e.st === 'unknown' ? ' isunknown' : '') + '\">' + thumb +",
 "      '<div class=\"ptitle\">' + esc(e.title || e.name) + '</div>' +",
@@ -1200,8 +1184,7 @@ function page() {
 "  if (!list.length) { status('待下载列表是空的'); return; }",
 "  if (androidBridge()) {",
 "    window.AndroidBridge.saveVideoBatch(JSON.stringify(nativePayload(list)));",
-"    try { localStorage.setItem(PKEY, '[]'); } catch (e) {} renderPending();",
-"    status('✅ ' + list.length + ' 个已交给 Android 下载队列');",
+    "    status('✅ ' + list.length + ' 个已交给 Android 下载（列表保留，也可再发到电脑）');",
 "    return;",
 "  }",
 "  if (nativeBridge()) {",
@@ -1635,8 +1618,7 @@ function page() {
 "      var cur = dl[0] || act[0];",
 "      box.innerHTML = '💻 电脑队列：待下 ' + jobs.filter(function(x){return x.state==='pending'}).length +",
 "        ' · 下载中 ' + dl.length + ' · 已完成 ' + dn +",
-"        (cur ? '<br>当前：' + esc(cur.name) + (cur.state === 'downloading' ? '（下载中…）' : '（排队中）') : '') +",
-"        '<br><a href=\"/pc/setup.bat\" download style=\"color:#7aa2ff\">电脑端未配置？下载 setup.bat（一次配置，自动开机启动）</a>';",
+"        (cur ? '<br>当前：' + esc(cur.name) + (cur.state === 'downloading' ? '（下载中…）' : '（排队中）') : '');",
 "    })",
 "    .catch(function () { });",
 "  if (force || !pcTimer) {",
@@ -1829,7 +1811,7 @@ function page() {
 "async function resolveAllWith(lines) {",
 "  var mode = getMode();",
 "  if (mode === 'single') lines = lines.slice(0, 1);",
-"  var okCount = 0, dupCount = 0, oldCount = 0, failCount = 0, done = 0;",
+"  var okCount = 0, dupCount = 0, oldCount = 0, failCount = 0, done = 0, pcN = 0;",
 "  for (var i = 0; i < lines.length; i += 3) {",
 "    var batch = lines.slice(i, i + 3);",
 "    var out = await Promise.all(batch.map(function (l) {",
@@ -1838,6 +1820,7 @@ function page() {
 "    }));",
 "    for (var b = 0; b < out.length; b++) {",
 "      done++;",
+"      if (out[b].ok && out[b].j.pcQueued) { pcN++; continue; }",
 "      if (out[b].ok) {",
 "        var added = addPending(out[b].j, out[b].j.sourceUrl);",
 "        if (added === 'skipped') dupCount++;",
@@ -1853,6 +1836,7 @@ function page() {
 "  if (oldCount) msg += '，其中 ' + oldCount + ' 个与下载历史重复（已标 ⚠️）';",
 "  if (dupCount) msg += '，跳过重复 ' + dupCount + ' 个';",
 "  if (failCount) msg += '，失败 ' + failCount + ' 个';",
+"  if (pcN) msg += '，YouTube ' + pcN + ' 个已发到电脑';",
 "  status(msg + (mode === 'batch' && okCount ? ' —— 继续粘贴，最后点底部「打包存相册」' : ''));",
 "}"
   ].join('\n');
@@ -2011,7 +1995,7 @@ css,
 '    仅下载公开可访问的内容，请尊重原作者版权，仅供个人学习使用。<br>',
 '    iOS 存相册：Safari 用户点「存到相册」按指引配一次快捷指令；App 用户点「存到相册」直接进相册。<br>',
 '    iOS 备选安装：Safari 打开 <a href="/profile">描述文件 /profile</a> → 设置 → 已下载描述文件 → 安装。<br>',
-'    <span style="color:#4d5478">网页 v7.4 · App v6.4 · Android v1.0 —— 两个版本号独立，页脚以「当前环境」那行为准</span><br>',
+'    <span style="color:#4d5478">网页 v7.5.1 · App v6.4 · Android v1.0 —— 两个版本号独立，页脚以「当前环境」那行为准</span><br>',
 '    <span class="env">💾 记录会自动备份到云端，重装 App 后自动恢复 · <a href="javascript:void(0)" onclick="openBackup()" style="color:#7aa2ff">备份详情</a></span><br>',
 '    <span id="cloudFoot" class="env"></span>',
 '    <span id="appenv" class="env"></span>',

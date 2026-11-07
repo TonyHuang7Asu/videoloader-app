@@ -12,19 +12,9 @@ android {
         versionCode 1
         versionName "1.0"
     }
-    signingConfigs {
-        release {
-            storeType 'PKCS12'
-            storeFile file('../keystore/vl.p12')
-            storePassword 'vl2026'
-            keyAlias 'videoloader'
-            keyPassword 'vl2026'
-        }
-    }
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.release
         }
     }
     compileOptions {

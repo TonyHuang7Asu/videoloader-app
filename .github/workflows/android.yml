@@ -13,17 +13,9 @@ jobs:
         with: { distribution: temurin, java-version: '17' }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: '8.7' }
-      - name: Build unsigned APK
-        run: gradle -p android assembleRelease --no-daemon
-      - name: Sign with apksigner (PEM)
-        run: |
-          BT=$(ls -d $ANDROID_HOME/build-tools/*/ | sort | tail -1)
-          $BT/apksigner sign \
-            --key android/keystore/key.pem \
-            --cert android/keystore/cert.pem \
-            --out android/app/build/outputs/apk/release/VideoLoader.apk \
-            android/app/build/outputs/apk/release/app-release-unsigned.apk
+      - name: Build debug APK (auto-signed)
+        run: gradle -p android assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: VideoLoader-android-apk
-          path: android/app/build/outputs/apk/release/VideoLoader.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk

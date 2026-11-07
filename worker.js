@@ -20,10 +20,91 @@
 const UPSTREAM_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
-const DL_HOST_OK = /(\.|^)(twimg\.com|telesco\.pe|telegram-cdn\.[a-z.]+|cdn-telegram\.org|cdn[0-9]*\.telegram\.org|telegram\.org|ts\.net)$/i;
-const IMG_HOST_OK = /(\.|^)(twimg\.com|telesco\.pe|cdn-telegram\.org|cdn[0-9]*\.telegram\.org)$/i;
+const DL_HOST_OK = /(\.|^)(twimg\.com|telesco\.pe|telegram-cdn\.[a-z.]+|cdn-telegram\.org|cdn[0-9]*\.telegram\.org|telegram\.org|odycdn\.com|private\.coffee)$/i;
+const IMG_HOST_OK = /(\.|^)(twimg\.com|telesco\.pe|cdn-telegram\.org|cdn[0-9]*\.telegram\.org|ytimg\.com|odycdn\.com|private\.coffee)$/i;
+
+// YouTube：走 Piped 公共实例的合并流（视频+音轨单文件、经实例代理不锁 IP），
+// Worker 只做流式转发，手机直接存相册。公共实例后端常被 YouTube 限流（/streams 500），
+// 属「尽力而为」：解析失败时提示稍后重试；稳定方案需自有出口（见 README 待办）。
+const PIPED_INSTANCES = ['https://api.piped.private.coffee', 'https://pipedapi.kavin.rocks', 'https://pipedapi.adminforge.de', 'https://pipedapi.drgns.space'];
 
 export default {
+  // 定时探针 v2：每 2 分钟从边缘测一遍 YouTube 通道可用性
+  // ① Cobalt：自动发现社区实例（instances.cobalt.best 目录）→ POST 解析请求，记录 tunnel/redirect 直链
+  // ② Piped：测实例 /streams，记录是否存在非 videoOnly（有音轨）的代理流
+  // 结果写 KV 'ytpulse2'，供远程诊断与解析实现选型
+  async scheduled(event, env, ctx) {
+    if (!env || !env.VL_KV) return;
+    const out = { at: Date.now(), cobalt: [], piped: [], dir: '' };
+    const YT_TEST = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+    try {
+      const dr = await fetch('https://instances.cobalt.best/api/instances.json', { signal: AbortSignal.timeout(10000) });
+      const dir = await dr.json();
+      const list = (Array.isArray(dir) ? dir : (dir.instances || []))
+        .filter((x) => x.api && (x.api_online !== false) && x.nokey !== undefined ? true : true)
+        .slice(0, 40);
+      out.dir = '目录实例数:' + list.length + ' 首条字段:' + Object.keys(list[0] || {}).join(',');
+      const cands = list.filter((x) => x.api).slice(0, 10);
+      for (const c of cands) {
+        const base = String(c.api).replace(/\/$/, '');
+        const rec = { api: base, code: 0, status: '' };
+        try {
+          const r = await fetch(base + '/', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ url: YT_TEST, videoQuality: '720', downloadMode: 'auto' }),
+            signal: AbortSignal.timeout(15000),
+          });
+          rec.code = r.status;
+          const b = await r.text();
+          rec.body = b.slice(0, 220);
+          try { rec.status = JSON.parse(b).status || ''; rec.tunnel = JSON.parse(b).url || ''; } catch (e) { }
+        } catch (e) { rec.err = (e.message || '超时').slice(0, 60); }
+        out.cobalt.push(rec);
+      }
+    } catch (e) { out.dir = '目录获取失败:' + (e.message || e); }
+    for (const inst of ['https://pipedapi.kavin.rocks', 'https://pipedapi.adminforge.de', 'https://api.piped.private.coffee', 'https://pipedapi.drgns.space']) {
+      const rec = { inst, code: 0, muxed: '' };
+      try {
+        const r = await fetch(inst + '/streams/dQw4w9WgXcQ', { signal: AbortSignal.timeout(10000) });
+        rec.code = r.status;
+        if (r.ok) {
+          const d = await r.json();
+          const muxes = (d.videoStreams || []).filter((v) => !v.videoOnly && v.url);
+          const mux = muxes.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))[0];
+          rec.muxed = mux ? '有合并流:' + (mux.quality || '?') + ':' + new URL(mux.url).host.slice(0, 40) : '无合并流';
+          rec.sample = { title: d.title, uploader: d.uploader, thumb: d.thumbnailUrl, mux: mux ? JSON.stringify(mux).slice(0, 380) : '' };
+          if (mux) {
+            try {
+              const s = await fetch(mux.url, { headers: { range: 'bytes=0-1' }, redirect: 'follow', signal: AbortSignal.timeout(15000) });
+              rec.muxStatus = s.status + (s.headers.get('content-range') ? ' range:' + s.headers.get('content-range').split('/')[1] : '');
+              try { await s.body.cancel(); } catch (e) { }
+            } catch (e) { rec.muxStatus = 'ERR:' + (e.message || '').slice(0, 50); }
+          }
+          try {
+            const tr = await fetch(inst + '/trending?region=US', { signal: AbortSignal.timeout(12000) });
+            if (tr.ok) {
+              const tl = await tr.json();
+              const ids = tl.slice(0, 3).map((x) => (x.url || '').split('v=')[1] || x.id || '').filter(Boolean);
+              rec.hit = [];
+              for (const id of ids) {
+                try {
+                  const sr = await fetch(inst + '/streams/' + id, { signal: AbortSignal.timeout(15000) });
+                  if (!sr.ok) { rec.hit.push(id.slice(0, 6) + ':' + sr.status); continue; }
+                  const sd = await sr.json();
+                  const n = (sd.videoStreams || []).filter((v) => !v.videoOnly && v.url).length;
+                  rec.hit.push(id.slice(0, 6) + ':' + (n ? '有' + n : '无'));
+                } catch (e) { rec.hit.push(id.slice(0, 6) + ':ERR'); }
+              }
+            }
+          } catch (e) { rec.hitErr = (e.message || '').slice(0, 60); }
+        }
+      } catch (e) { rec.err = (e.message || '超时').slice(0, 60); }
+      out.piped.push(rec);
+    }
+    await env.VL_KV.put('ytpulse2', JSON.stringify(out));
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
     const secret = env?.VL_SECRET || 'videoloader-fallback-secret';
@@ -31,7 +112,7 @@ export default {
       switch (url.pathname) {
         case '/api/resolve':
           if (/youtube\.com|youtu\.be/i.test(url.hostname + ' ' + (url.searchParams.get('url') || ''))) {
-            return await apiResolveYouTube(url, env, secret);
+            return await apiResolveYouTube(url, secret);
           }
           return await apiResolve(url, secret);
         case '/api/backup':
@@ -105,21 +186,32 @@ export default {
   },
 };
 
-// ---------------- YouTube（Mac yt-dlp 引擎） ----------------
-async function apiResolveYouTube(url, env, secret) {
-  const target = url.searchParams.get("url") || "";
-  if (!/youtube\.com|youtu\.be/i.test(target)) return jres({ ok: false, error: "不是 YouTube 链接" }, 400);
-  if (!env || !env.VL_KV) return jres({ ok: false, error: "KV 未绑定" }, 501);
-  const slot = await pcSlotOf(env, secret);
-  const jobs = await pcRead(env, slot);
-  const vid = (target.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{6,})/) || [])[1] || String(Date.now() % 100000);
-  for (const j of jobs) if (j.u === target && (j.state === "pending" || j.state === "downloading")) {
-    return jres({ ok: true, pcQueued: true, platform: "YouTube", title: "YouTube_" + vid, dupe: true });
+// ---------------- YouTube（Piped 公共实例代理，尽力而为） ----------------
+async function apiResolveYouTube(url, secret) {
+  const target = url.searchParams.get('url') || '';
+  const vid = (target.match(/(?:v=|v\/|youtu\.be\/|shorts\/|embed\/)([A-Za-z0-9_-]{6,})/) || [])[1];
+  if (!vid) return jres({ ok: false, error: 'YouTube 视频 ID 解析失败' }, 400);
+  const errs = [];
+  for (const inst of PIPED_INSTANCES) {
+    try {
+      const r = await fetch(inst + '/streams/' + vid, { signal: AbortSignal.timeout(15000) });
+      if (!r.ok) { errs.push(inst.replace('https://', '') + ':' + r.status); continue; }
+      const d = await r.json();
+      // 合并流 = 自带音轨（videoOnly=false）；优先数字清晰度（itag 18/22），LBRY 镜像垫底
+      const muxes = (d.videoStreams || []).filter((v) => !v.videoOnly && v.url);
+      const mux = muxes.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))[0];
+      if (!mux) { errs.push(inst.replace('https://', '') + ':无合并流'); continue; }
+      const title = (d.title || ('YouTube_' + vid)).replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 80);
+      let thumb = d.thumbnailUrl || '';
+      try { if (thumb && !IMG_HOST_OK.test(new URL(thumb).hostname)) thumb = ''; } catch (e) { thumb = ''; }
+      const sig = (await hmacHex(mux.url, secret)).slice(0, 32);
+      return jres({
+        ok: true, platform: 'YouTube', author: d.uploader || '', title, thumb, published: null,
+        items: [{ url: mux.url, sig, name: title + '.mp4', ext: 'mp4', res: parseInt(mux.quality) || 360, bytes: Math.max(0, mux.contentLength || 0) }],
+      });
+    } catch (e) { errs.push(inst.replace('https://', '') + ':' + (e.message || '超时')); }
   }
-  const job = { id: "yt" + Date.now().toString(36), u: target, name: "YouTube_" + vid + ".mp4", dl: target, type: "yt", state: "pending", size: 0, error: "", at: Date.now() };
-  jobs.push(job);
-  await pcWrite(env, slot, jobs);
-  return jres({ ok: true, pcQueued: true, platform: "YouTube", title: job.name });
+  return jres({ ok: false, error: 'YouTube 暂时解析不了（公共实例被限流），稍后重试：' + errs.slice(0, 2).join('；') }, 502);
 }
 
 // ---------------- 云端备份（单部署单槽位） ----------------
